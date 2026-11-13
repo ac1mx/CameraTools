@@ -89,10 +89,8 @@ namespace CameraTools
 		bool editingKeybindings = false;
 		public enum FMModeTypes { Position, Speed };
 		[CTPersistantField] public FMModeTypes fmMode = FMModeTypes.Position;
-		readonly int FMModeTypesMax = Enum.GetValues(typeof(FMModeTypes)).Length - 1;
 		Vector4 fmSpeeds = Vector4.zero; // x,y,z,zoom.
 		public enum FMPivotModes { Camera, Target };
-		readonly int FMPivotModeMax = Enum.GetValues(typeof(FMPivotModes)).Length - 1;
 		[CTPersistantField] public FMPivotModes fmPivotMode = FMPivotModes.Camera;
 		#endregion
 
@@ -100,6 +98,11 @@ namespace CameraTools
 		public static bool guiEnabled = false;
 		public static bool hasAddedButton = false;
 		[CTPersistantField] public static bool textInput = false;
+		[CTPersistantField] public bool showSettings = false;
+		static readonly ToolModes[] toolModeOrder = [ToolModes.DogfightCamera, ToolModes.StationaryCamera, ToolModes.Pathing];
+		GUIContent[] toolModeLabels;
+		GUIContent[] stationaryTargetLabels; // In StationaryTargetMode order.
+		GUIContent[] stationaryPositionLabels; // In StationaryPositionIndex order.
 		bool updateFOV = false;
 		float windowWidth = 250;
 		float windowHeight = 400;
@@ -135,7 +138,6 @@ namespace CameraTools
 		GUIStyle centerLabel;
 		GUIStyle leftLabel;
 		GUIStyle rightLabel;
-		GUIStyle leftLabelBold;
 		GUIStyle titleStyle;
 		GUIStyle inputFieldStyle;
 		GUIStyle watermarkStyle;
@@ -259,7 +261,6 @@ namespace CameraTools
 
 		#region Dogfight Camera Fields
 		public enum DogfightOffsetMode { World, Camera, Vessel }
-		readonly int DogfightOffsetModeMax = Enum.GetValues(typeof(DogfightOffsetMode)).Length - 1;
 		public Vessel dogfightTarget;
 		[CTPersistantField] public float dogfightDistance = 50f;
 		[CTPersistantField] public float dogfightMaxDistance = 100;
@@ -290,6 +291,8 @@ namespace CameraTools
 		#endregion
 
 		#region Stationary Camera Fields
+		public enum StationaryTargetMode { Self, Picked, None }
+		[CTPersistantField] public StationaryTargetMode stationaryTargetMode = StationaryTargetMode.Self; // Self: re-target the active vessel on every activation and vessel switch.
 		[CTPersistantField] public bool autoLandingPosition = false;
 		bool autoLandingCamEnabled = false;
 		[CTPersistantField] public bool autoFlybyPosition = false;
@@ -465,12 +468,14 @@ namespace CameraTools
 			leftLabel = new GUIStyle { alignment = TextAnchor.UpperLeft };
 			leftLabel.normal.textColor = Color.white;
 			rightLabel = new GUIStyle(leftLabel) { alignment = TextAnchor.UpperRight };
-			leftLabelBold = new GUIStyle(leftLabel) { fontStyle = FontStyle.Bold };
 			titleStyle = new GUIStyle(centerLabel) { fontSize = 24, alignment = TextAnchor.MiddleCenter };
 			watermarkStyle = new GUIStyle(leftLabel);
 			watermarkStyle.normal.textColor = XKCDColors.LightBlueGrey;
 			watermarkStyle.fontSize = 12;
 			contentWidth = windowWidth - 2 * leftIndent;
+			toolModeLabels = [Localize("ModeDogfight"), Localize("ModeStationary"), Localize("ModePathing")];
+			stationaryTargetLabels = [Localize("TargetModeSelf"), Localize("TargetModePick"), Localize("TargetModeNone")];
+			stationaryPositionLabels = [Localize("PosCurrent"), Localize("PosFlyby"), Localize("PosLanding"), Localize("PosOffset"), Localize("PosClick")];
 
 			inputFields = new Dictionary<string, FloatInputField> {
 				{"autoZoomMargin", gameObject.AddComponent<FloatInputField>().Initialise(0, autoZoomMargin, 0f, autoZoomMarginMax, 4)},
@@ -791,14 +796,17 @@ namespace CameraTools
 					{
 						camTarget = tgt;
 						hasTarget = true;
+						stationaryTargetMode = StationaryTargetMode.Picked;
 					}
 					else
 					{
 						Vector3 pos = GetPosFromMouse();
 						if (pos != Vector3.zero)
 						{
+							camTarget = null;
 							lastTargetPosition = pos;
 							hasTarget = true;
+							stationaryTargetMode = StationaryTargetMode.Picked;
 						}
 					}
 				}
@@ -1555,11 +1563,13 @@ namespace CameraTools
 				SetCameraParent(deathCam.transform, true); // First update the cameraParent to the last deathCam configuration offset for the active vessel's CoM.
 
 				manualPosition = Vector3.zero;
-				if (randomMode)
+				if (randomMode || stationaryTargetMode == StationaryTargetMode.Self)
 				{
-					camTarget = FlightGlobals.ActiveVessel.GetReferenceTransformPart();
-					if (camTarget == null) // Sometimes the vessel doesn't have the reference transform part set up. It ought to be the root part usually.
-						camTarget = FlightGlobals.ActiveVessel.rootPart;
+					camTarget = SelfTargetPart();
+				}
+				else if (stationaryTargetMode == StationaryTargetMode.None)
+				{
+					camTarget = null;
 				}
 				hasTarget = camTarget != null;
 				lastVesselCoM = vessel.CoM;
@@ -1701,6 +1711,38 @@ namespace CameraTools
 			flightCamera.transform.position = position + (manualOffsetUp - heightAboveTerrain) * cameraUp; // Correct the camera altitude.
 			autoLandingCamEnabled = true;
 			return true;
+		}
+
+		/// <summary>
+		/// The active vessel's reference transform part, falling back to the root part when it has none.
+		/// </summary>
+		static Part SelfTargetPart()
+		{
+			var v = FlightGlobals.ActiveVessel;
+			if (v == null) return null;
+			var part = v.GetReferenceTransformPart();
+			return part != null ? part : v.rootPart;
+		}
+
+		void SetStationaryTargetMode(StationaryTargetMode mode)
+		{
+			stationaryTargetMode = mode;
+			waitingForTarget = false;
+			switch (mode)
+			{
+				case StationaryTargetMode.Self:
+					camTarget = SelfTargetPart();
+					hasTarget = camTarget != null;
+					break;
+				case StationaryTargetMode.None:
+					camTarget = null;
+					hasTarget = false;
+					break;
+				case StationaryTargetMode.Picked:
+					waitingForTarget = true;
+					mouseUp = false;
+					break;
+			}
 		}
 
 		Vector3 lastOffset = Vector3.zero;
@@ -2904,7 +2946,14 @@ namespace CameraTools
 
 			GUI.Label(new Rect(0, contentTop, windowWidth, 40), LocalizeStr("Title"), titleStyle);
 			GUI.Label(new Rect(windowWidth / 2f, contentTop + 35f, windowWidth / 2f - leftIndent - entryHeight, entryHeight), Localize("Version", Version), watermarkStyle);
-			if (GUI.Toggle(new Rect(windowWidth - leftIndent - 14f, contentTop + 31f, 20f, 20f), cameraToolActive, "") != cameraToolActive)
+
+			float line = 1.75f;
+			float parseResult;
+
+			// Activate / revert
+			var activeColor = GUI.backgroundColor;
+			if (cameraToolActive) GUI.backgroundColor = XKCDColors.BrightGreen;
+			if (GUI.Button(new Rect(leftIndent, contentTop + (++line * entryHeight), contentWidth, entryHeight + 4f), cameraToolActive ? Localize("Revert", $" [{revertKey}]") : Localize("Activate", $" [{cameraKey}]")))
 			{
 				if (cameraToolActive)
 				{
@@ -2921,22 +2970,20 @@ namespace CameraTools
 					CameraActivate();
 				}
 			}
+			GUI.backgroundColor = activeColor;
+			line += 0.3f;
 
-			float line = 1.75f;
-			float parseResult;
-
-			//tool mode switcher
-			GUI.Label(LabelRect(++line), Localize("Tool", toolMode.ToString()), leftLabelBold);
-			if (GUI.Button(new Rect(leftIndent, contentTop + (++line * entryHeight), 25, entryHeight - 2), Localize("PrevMode")))
+			// Tool mode
+			int modeIndex = Array.IndexOf(toolModeOrder, toolMode);
+			int newModeIndex = GUI.Toolbar(new Rect(leftIndent, contentTop + (++line * entryHeight), contentWidth, entryHeight), modeIndex, toolModeLabels);
+			if (newModeIndex != modeIndex && newModeIndex >= 0)
 			{
-				CycleToolMode(false);
+				toolMode = toolModeOrder[newModeIndex];
+				if (toolMode != ToolModes.Pathing) DeselectKeyframe();
 				if (cameraToolActive) CameraActivate();
 			}
-			if (GUI.Button(new Rect(leftIndent + 25 + 4, contentTop + (line * entryHeight), 25, entryHeight - 2), Localize("NextMode")))
-			{
-				CycleToolMode(true);
-				if (cameraToolActive) CameraActivate();
-			}
+
+			randomMode = GUI.Toggle(new Rect(leftIndent, contentTop + (++line * entryHeight), contentWidth - 60f, entryHeight), randomMode, Localize("RandomMode"));
 			if (GUI.Button(new Rect(windowWidth - leftIndent - 54, contentTop + (line * entryHeight), 25, entryHeight - 2), Localize("ShowTooltips"), ShowTooltips ? GUI.skin.box : GUI.skin.button))
 			{
 				ShowTooltips = !ShowTooltips;
@@ -2988,14 +3035,6 @@ namespace CameraTools
 				if (BDArmory.hasBDA) bdArmory.ToggleInputFields(textInput);
 			}
 
-			++line;
-			useAudioEffects = GUI.Toggle(LabelRect(++line), useAudioEffects, Localize("AudioEffects"));
-			if (enableVFX != (enableVFX = GUI.Toggle(LabelRect(++line), enableVFX, Localize("VisualEffects"))))
-			{
-				if (cameraToolActive) origParent.position = enableVFX ? cameraParent.transform.position : FlightGlobals.currentMainBody.position; // Set the origParent to the centre of the current mainbody to make sure it's out of range for FX to take effect.
-			}
-			if (BDArmory.hasBDA) bdArmory.autoEnableForBDA = GUI.Toggle(LabelRect(++line), bdArmory.autoEnableForBDA, Localize("AutoEnableForBDA"));
-			randomMode = GUI.Toggle(ThinRect(++line), randomMode, Localize("RandomMode"));
 			if (randomMode)
 			{
 				float oldValue = randomModeDogfightChance;
@@ -3138,27 +3177,7 @@ namespace CameraTools
 					inputFields["randomModePathingChance"].currentValue = randomModePathingChance;
 				}
 			}
-			if (UIScaleFollowsStock)
-			{
-				if (UIScaleFollowsStock != (UIScaleFollowsStock = GUI.Toggle(ThinRect(++line), UIScaleFollowsStock, Localize("UIScale", $"{LocalizeStr("UIScaleFollowsStock")} ({GameSettings.UI_SCALE:F2}x)"))))
-				{ windowRect.x += windowRect.width * (GameSettings.UI_SCALE - UIScale); }
-			}
-			else
-			{
-				if (UIScaleFollowsStock != (UIScaleFollowsStock = GUI.Toggle(ThinHalfRect(++line), UIScaleFollowsStock, textInput ? Localize("UIScale") : Localize("UIScale", $"{UIScale:F2}x"))))
-				{ windowRect.x += windowRect.width * (UIScale - GameSettings.UI_SCALE); }
-				if (!scalingUI) previousUIScale = UIScale;
-				if (!textInput)
-				{
-					if (UIScale != (UIScale = MathUtils.RoundToUnit(GUI.HorizontalSlider(new Rect(leftIndent + contentWidth / 2f, contentTop + (line * entryHeight) + 6, contentWidth / 2f, entryHeight), UIScale, 0.5f, 2f), 0.05f)))
-					{ scalingUI = true; }
-				}
-				else
-				{
-					inputFields["UIScale"].tryParseValue(GUI.TextField(RightRect(line), inputFields["UIScale"].possibleValue, 4, inputFieldStyle));
-					if (UIScale != (UIScale = inputFields["UIScale"].currentValue)) windowRect.x += windowRect.width * (previousUIScale - UIScale);
-				}
-			}
+			if (BDArmory.hasBDA) bdArmory.autoEnableForBDA = GUI.Toggle(LabelRect(++line), bdArmory.autoEnableForBDA, Localize("AutoEnableForBDA"));
 
 			++line;
 			if (toolMode != ToolModes.Pathing)
@@ -3195,22 +3214,61 @@ namespace CameraTools
 				}
 			}
 
-			GUI.Label(LeftRect(++line), Localize("CameraShake"));
-			if (!textInput)
-			{
-				shakeMultiplier = Mathf.Round(GUI.HorizontalSlider(new Rect(leftIndent, contentTop + (++line * entryHeight), contentWidth - 45, entryHeight), shakeMultiplier, 0f, 10f) * 10f) / 10f;
-				GUI.Label(new Rect(leftIndent + contentWidth - 40, contentTop + ((line - 0.25f) * entryHeight), 40, entryHeight), shakeMultiplier.ToString("G3") + "x");
-			}
-			else
-			{
-				inputFields["shakeMultiplier"].tryParseValue(GUI.TextField(RightRect(line), inputFields["shakeMultiplier"].possibleValue, 8, inputFieldStyle));
-				shakeMultiplier = inputFields["shakeMultiplier"].currentValue;
-			}
-
 			++line;
 			//Stationary camera GUI
 			if (toolMode == ToolModes.StationaryCamera)
 			{
+				// Target
+				string targetName;
+				if (waitingForTarget) targetName = LocalizeStr("Waiting");
+				else if (camTarget != null) targetName = camTarget.vessel != null && camTarget.vessel != FlightGlobals.ActiveVessel ? $"{camTarget.partInfo.title} ({camTarget.vessel.vesselName})" : (stationaryTargetMode == StationaryTargetMode.Self && camTarget.vessel != null ? camTarget.vessel.vesselName : camTarget.partInfo.title);
+				else if (hasTarget) targetName = LocalizeStr("TargetPoint");
+				else targetName = LocalizeStr("None");
+				GUI.Label(LabelRect(++line), Localize("CameraTarget", targetName), leftLabel);
+				int clickedTarget = ButtonRow(LabelRect(++line), (int)stationaryTargetMode, stationaryTargetLabels);
+				if (clickedTarget >= 0) SetStationaryTargetMode((StationaryTargetMode)clickedTarget); // Clicking Pick again re-picks.
+				targetCoM = GUI.Toggle(ThinRect(++line), targetCoM, Localize("VesselCoM"));
+				line += 0.25f;
+
+				// Position
+				GUI.Label(LabelRect(++line), Localize("CameraPosition"), leftLabel);
+				int positionIndex = StationaryPositionIndex;
+				int newPositionIndex = GUI.SelectionGrid(new Rect(leftIndent, contentTop + (++line * entryHeight), contentWidth, 2f * entryHeight - 2f), positionIndex, stationaryPositionLabels, 3);
+				++line;
+				if (newPositionIndex != positionIndex) SetStationaryPosition(newPositionIndex);
+				if (manualOffset || autoLandingPosition)
+				{
+					GUI.Label(new Rect(leftIndent, contentTop + (++line * entryHeight), 60, entryHeight), Localize("FwdPos"), leftLabel);
+					float textFieldWidth = 42;
+					Rect fwdFieldRect = new Rect(leftIndent + contentWidth - textFieldWidth - (3 * incrButtonWidth), contentTop + (line * entryHeight), textFieldWidth, entryHeight);
+					guiOffsetForward = GUI.TextField(fwdFieldRect, guiOffsetForward.ToString());
+					if (float.TryParse(guiOffsetForward, out parseResult))
+					{
+						manualOffsetForward = parseResult;
+					}
+					DrawIncrementButtons(fwdFieldRect, ref manualOffsetForward);
+					guiOffsetForward = manualOffsetForward.ToString();
+
+					GUI.Label(new Rect(leftIndent, contentTop + (++line * entryHeight), 60, entryHeight), Localize("RightPos"), leftLabel);
+					Rect rightFieldRect = new Rect(fwdFieldRect.x, contentTop + (line * entryHeight), textFieldWidth, entryHeight);
+					guiOffsetRight = GUI.TextField(rightFieldRect, guiOffsetRight);
+					if (float.TryParse(guiOffsetRight, out parseResult))
+					{
+						manualOffsetRight = parseResult;
+					}
+					DrawIncrementButtons(rightFieldRect, ref manualOffsetRight);
+					guiOffsetRight = manualOffsetRight.ToString();
+
+					GUI.Label(new Rect(leftIndent, contentTop + (++line * entryHeight), 60, entryHeight), Localize("UpPos"), leftLabel);
+					Rect upFieldRect = new Rect(fwdFieldRect.x, contentTop + (line * entryHeight), textFieldWidth, entryHeight);
+					guiOffsetUp = GUI.TextField(upFieldRect, guiOffsetUp);
+					if (float.TryParse(guiOffsetUp, out parseResult))
+					{ manualOffsetUp = parseResult; }
+					DrawIncrementButtons(upFieldRect, ref manualOffsetUp);
+					guiOffsetUp = manualOffsetUp.ToString();
+				}
+				line += 0.25f;
+
 				GUI.Label(LeftRect(++line), Localize("MaxRelVel"), leftLabel);
 				inputFields["maxRelV"].tryParseValue(GUI.TextField(RightRect(line), inputFields["maxRelV"].possibleValue, 12, inputFieldStyle));
 				maxRelV = inputFields["maxRelV"].currentValue;
@@ -3219,85 +3277,8 @@ namespace CameraTools
 				maintainInitialVelocity = GUI.Toggle(LeftRect(++line), maintainInitialVelocity, Localize("MaintainVel"));
 				if (maintainInitialVelocity) useOrbital = GUI.Toggle(RightRect(line), useOrbital, Localize("UseOrbital"));
 
-				// GUI.Label(LeftRect(++line), $"time offset: {δt}", leftLabel);
-				// δt = Mathf.Round(GUI.HorizontalSlider(RightRect(line), δt, -2f, 2f) * 4f) / 4f;
-
-				GUI.Label(new Rect(leftIndent, contentTop + (++line * entryHeight), contentWidth, entryHeight), Localize("CameraPosition"), leftLabel);
-				var posButtonText = Localize("SetPositionClick");
-				if (setPresetOffset) posButtonText = Localize("ClearPosition");
-				if (waitingForPosition) posButtonText = Localize("Waiting");
-				if (FlightGlobals.ActiveVessel != null && GUI.Button(ThinRect(++line), posButtonText))
-				{
-					if (setPresetOffset)
-					{
-						setPresetOffset = false;
-					}
-					else
-					{
-						waitingForPosition = true;
-						mouseUp = false;
-					}
-				}
-				autoFlybyPosition = GUI.Toggle(LabelRect(++line), autoFlybyPosition, Localize("AutoFlybyPos"));
-				autoLandingPosition = GUI.Toggle(LabelRect(++line), autoLandingPosition, Localize("AutoLandingPos")); ;
-				if (autoFlybyPosition || autoLandingPosition) { manualOffset = false; }
-				manualOffset = GUI.Toggle(LabelRect(++line), manualOffset, Localize("ManualFlybyPos"));
-				Color origGuiColor = GUI.color;
-				if (manualOffset)
-				{ autoFlybyPosition = false; autoLandingPosition = false; }
-				else if (!autoLandingPosition)
-				{ GUI.color = new Color(0.5f, 0.5f, 0.5f, origGuiColor.a); }
-
-				GUI.Label(new Rect(leftIndent, contentTop + (++line * entryHeight), 60, entryHeight), Localize("FwdPos"), leftLabel);
-				float textFieldWidth = 42;
-				Rect fwdFieldRect = new Rect(leftIndent + contentWidth - textFieldWidth - (3 * incrButtonWidth), contentTop + (line * entryHeight), textFieldWidth, entryHeight);
-				guiOffsetForward = GUI.TextField(fwdFieldRect, guiOffsetForward.ToString());
-				if (float.TryParse(guiOffsetForward, out parseResult))
-				{
-					manualOffsetForward = parseResult;
-				}
-				DrawIncrementButtons(fwdFieldRect, ref manualOffsetForward);
-				guiOffsetForward = manualOffsetForward.ToString();
-
-				GUI.Label(new Rect(leftIndent, contentTop + (++line * entryHeight), 60, entryHeight), Localize("RightPos"), leftLabel);
-				Rect rightFieldRect = new Rect(fwdFieldRect.x, contentTop + (line * entryHeight), textFieldWidth, entryHeight);
-				guiOffsetRight = GUI.TextField(rightFieldRect, guiOffsetRight);
-				if (float.TryParse(guiOffsetRight, out parseResult))
-				{
-					manualOffsetRight = parseResult;
-				}
-				DrawIncrementButtons(rightFieldRect, ref manualOffsetRight);
-				guiOffsetRight = manualOffsetRight.ToString();
-
-				GUI.Label(new Rect(leftIndent, contentTop + (++line * entryHeight), 60, entryHeight), Localize("UpPos"), leftLabel);
-				Rect upFieldRect = new Rect(fwdFieldRect.x, contentTop + (line * entryHeight), textFieldWidth, entryHeight);
-				guiOffsetUp = GUI.TextField(upFieldRect, guiOffsetUp);
-				if (float.TryParse(guiOffsetUp, out parseResult))
-				{ manualOffsetUp = parseResult; }
-				DrawIncrementButtons(upFieldRect, ref manualOffsetUp);
-				guiOffsetUp = manualOffsetUp.ToString();
-				GUI.color = origGuiColor;
-				++line;
-
-				GUI.Label(LabelRect(++line), Localize("CameraTarget", camTarget == null ? "None" : camTarget.partInfo.title), leftLabel);
-				if (GUI.Button(ThinRect(++line), waitingForTarget ? Localize("Waiting") : Localize("SetTargetClick")))
-				{
-					waitingForTarget = true;
-					mouseUp = false;
-				}
-				if (GUI.Button(ThinHalfRect(++line, 0), Localize("TargetSelf")))
-				{
-					camTarget = FlightGlobals.ActiveVessel.GetReferenceTransformPart();
-					hasTarget = true;
-				}
-				if (GUI.Button(ThinHalfRect(line, 1), Localize("ClearTarget")))
-				{
-					camTarget = null;
-					hasTarget = false;
-				}
 				if (!(saveRotation = GUI.Toggle(ThinHalfRect(++line, 0), saveRotation, Localize("SaveRotation")))) { hasSavedRotation = false; }
 				if (GUI.Button(ThinHalfRect(line, 1), Localize("ResetRoll"))) ResetRoll();
-				targetCoM = GUI.Toggle(ThinRect(++line), targetCoM, Localize("VesselCoM"));
 			}
 			else if (toolMode == ToolModes.DogfightCamera)
 			{
@@ -3472,9 +3453,8 @@ namespace CameraTools
 					dogfightRotationTarget = vessel != null ? vessel.CoM : default;
 				}
 
-				GUI.Label(SliderLabelLeft(++line, contentWidth / 2f - 30f), Localize("DogfightOffsetMode"));
-				dogfightOffsetMode = (DogfightOffsetMode)Mathf.RoundToInt(GUI.HorizontalSlider(SliderRect(line, contentWidth / 2f - 25f, -25f), (int)dogfightOffsetMode, 0, DogfightOffsetModeMax));
-				GUI.Label(SliderLabelRight(line, 25f), dogfightOffsetMode.ToString());
+				GUI.Label(LabelRect(++line), Localize("DogfightOffsetMode"), leftLabel);
+				dogfightOffsetMode = EnumRow(LabelRect(++line), dogfightOffsetMode);
 
 				if (dogfightChasePlaneMode != (dogfightChasePlaneMode = GUI.Toggle(LabelRect(++line), dogfightChasePlaneMode, Localize("ChasePlaneMode"))))
 				{
@@ -3579,66 +3559,110 @@ namespace CameraTools
 			}
 
 			line += 0.25f;
-			enableKeypad = GUI.Toggle(ThinRect(++line), enableKeypad, Localize("KeypadControl"));
-			if (enableKeypad)
+			GUI.Label(SliderLabelLeft(++line, contentWidth / 3f), Localize("PivotMode"));
+			fmPivotMode = EnumRow(new Rect(leftIndent + contentWidth / 3f, contentTop + line * entryHeight, contentWidth * 2f / 3f, entryHeight), fmPivotMode);
+
+			line += 0.25f;
+			if (GUI.Button(LabelRect(++line), Localize(showSettings ? "SettingsOpen" : "SettingsClosed")))
+			{ showSettings = !showSettings; }
+			if (showSettings)
 			{
-				GUI.Label(SliderLabelLeft(++line, contentWidth / 2f - 30f), Localize("MoveSpeed"));
+				useAudioEffects = GUI.Toggle(LabelRect(++line), useAudioEffects, Localize("AudioEffects"));
+				if (enableVFX != (enableVFX = GUI.Toggle(LabelRect(++line), enableVFX, Localize("VisualEffects"))))
+				{
+					if (cameraToolActive) origParent.position = enableVFX ? cameraParent.transform.position : FlightGlobals.currentMainBody.position; // Set the origParent to the centre of the current mainbody to make sure it's out of range for FX to take effect.
+				}
+
+				GUI.Label(LeftRect(++line), Localize("CameraShake"));
 				if (!textInput)
 				{
-					freeMoveSpeedRaw = Mathf.RoundToInt(GUI.HorizontalSlider(SliderRect(line, contentWidth / 2f - 30f), freeMoveSpeedRaw, freeMoveSpeedMinRaw, freeMoveSpeedMaxRaw) * 100f) / 100f;
-					freeMoveSpeed = Mathf.Pow(10f, freeMoveSpeedRaw);
-					GUI.Label(SliderLabelRight(line), freeMoveSpeed.ToString("G4"));
+					shakeMultiplier = Mathf.Round(GUI.HorizontalSlider(new Rect(leftIndent, contentTop + (++line * entryHeight), contentWidth - 45, entryHeight), shakeMultiplier, 0f, 10f) * 10f) / 10f;
+					GUI.Label(new Rect(leftIndent + contentWidth - 40, contentTop + ((line - 0.25f) * entryHeight), 40, entryHeight), shakeMultiplier.ToString("G3") + "x");
 				}
 				else
 				{
-					inputFields["freeMoveSpeed"].tryParseValue(GUI.TextField(RightRect(line), inputFields["freeMoveSpeed"].possibleValue, 8, inputFieldStyle));
-					freeMoveSpeed = inputFields["freeMoveSpeed"].currentValue;
+					inputFields["shakeMultiplier"].tryParseValue(GUI.TextField(RightRect(line), inputFields["shakeMultiplier"].possibleValue, 8, inputFieldStyle));
+					shakeMultiplier = inputFields["shakeMultiplier"].currentValue;
 				}
 
-				GUI.Label(SliderLabelLeft(++line, contentWidth / 2f - 30f), Localize("ZoomSpeed"));
-				if (!textInput)
+				if (UIScaleFollowsStock)
 				{
-					zoomSpeedRaw = Mathf.RoundToInt(GUI.HorizontalSlider(SliderRect(line, contentWidth / 2f - 30f), zoomSpeedRaw, zoomSpeedMinRaw, zoomSpeedMaxRaw) * 100f) / 100f;
-					keyZoomSpeed = Mathf.Pow(10f, zoomSpeedRaw);
-					GUI.Label(SliderLabelRight(line), keyZoomSpeed.ToString("G3"));
+					if (UIScaleFollowsStock != (UIScaleFollowsStock = GUI.Toggle(ThinRect(++line), UIScaleFollowsStock, Localize("UIScale", $"{LocalizeStr("UIScaleFollowsStock")} ({GameSettings.UI_SCALE:F2}x)"))))
+					{ windowRect.x += windowRect.width * (GameSettings.UI_SCALE - UIScale); }
 				}
 				else
 				{
-					inputFields["keyZoomSpeed"].tryParseValue(GUI.TextField(RightRect(line), inputFields["keyZoomSpeed"].possibleValue, 8, inputFieldStyle));
-					keyZoomSpeed = inputFields["keyZoomSpeed"].currentValue;
+					if (UIScaleFollowsStock != (UIScaleFollowsStock = GUI.Toggle(ThinHalfRect(++line), UIScaleFollowsStock, textInput ? Localize("UIScale") : Localize("UIScale", $"{UIScale:F2}x"))))
+					{ windowRect.x += windowRect.width * (UIScale - GameSettings.UI_SCALE); }
+					if (!scalingUI) previousUIScale = UIScale;
+					if (!textInput)
+					{
+						if (UIScale != (UIScale = MathUtils.RoundToUnit(GUI.HorizontalSlider(new Rect(leftIndent + contentWidth / 2f, contentTop + (line * entryHeight) + 6, contentWidth / 2f, entryHeight), UIScale, 0.5f, 2f), 0.05f)))
+						{ scalingUI = true; }
+					}
+					else
+					{
+						inputFields["UIScale"].tryParseValue(GUI.TextField(RightRect(line), inputFields["UIScale"].possibleValue, 4, inputFieldStyle));
+						if (UIScale != (UIScale = inputFields["UIScale"].currentValue)) windowRect.x += windowRect.width * (previousUIScale - UIScale);
+					}
 				}
 
-				GUI.Label(SliderLabelLeft(++line, contentWidth / 2f - 30f), Localize("ControlMode"));
-				fmMode = (FMModeTypes)Mathf.RoundToInt(GUI.HorizontalSlider(SliderRect(line, contentWidth / 2f - 25f, -25f), (int)fmMode, 0, FMModeTypesMax));
-				GUI.Label(SliderLabelRight(line, 25f), fmMode.ToString());
-			}
+				enableKeypad = GUI.Toggle(ThinRect(++line), enableKeypad, Localize("KeypadControl"));
+				if (enableKeypad)
+				{
+					GUI.Label(SliderLabelLeft(++line, contentWidth / 2f - 30f), Localize("MoveSpeed"));
+					if (!textInput)
+					{
+						freeMoveSpeedRaw = Mathf.RoundToInt(GUI.HorizontalSlider(SliderRect(line, contentWidth / 2f - 30f), freeMoveSpeedRaw, freeMoveSpeedMinRaw, freeMoveSpeedMaxRaw) * 100f) / 100f;
+						freeMoveSpeed = Mathf.Pow(10f, freeMoveSpeedRaw);
+						GUI.Label(SliderLabelRight(line), freeMoveSpeed.ToString("G4"));
+					}
+					else
+					{
+						inputFields["freeMoveSpeed"].tryParseValue(GUI.TextField(RightRect(line), inputFields["freeMoveSpeed"].possibleValue, 8, inputFieldStyle));
+						freeMoveSpeed = inputFields["freeMoveSpeed"].currentValue;
+					}
 
-			GUI.Label(SliderLabelLeft(++line, contentWidth / 2f - 30f), Localize("PivotMode"));
-			fmPivotMode = (FMPivotModes)Mathf.RoundToInt(GUI.HorizontalSlider(SliderRect(line, contentWidth / 2f - 25f, -25f), (int)fmPivotMode, 0, FMPivotModeMax));
-			GUI.Label(SliderLabelRight(line, 25f), fmPivotMode.ToString());
-			++line;
+					GUI.Label(SliderLabelLeft(++line, contentWidth / 2f - 30f), Localize("ZoomSpeed"));
+					if (!textInput)
+					{
+						zoomSpeedRaw = Mathf.RoundToInt(GUI.HorizontalSlider(SliderRect(line, contentWidth / 2f - 30f), zoomSpeedRaw, zoomSpeedMinRaw, zoomSpeedMaxRaw) * 100f) / 100f;
+						keyZoomSpeed = Mathf.Pow(10f, zoomSpeedRaw);
+						GUI.Label(SliderLabelRight(line), keyZoomSpeed.ToString("G3"));
+					}
+					else
+					{
+						inputFields["keyZoomSpeed"].tryParseValue(GUI.TextField(RightRect(line), inputFields["keyZoomSpeed"].possibleValue, 8, inputFieldStyle));
+						keyZoomSpeed = inputFields["keyZoomSpeed"].currentValue;
+					}
 
-			// Key bindings
-			if (GUI.Button(LabelRect(++line), Localize("EditKeybindings")))
-			{ editingKeybindings = !editingKeybindings; }
-			if (editingKeybindings)
-			{
-				cameraKey = KeyBinding(cameraKey, LocalizeStr("Activate"), ++line);
-				revertKey = KeyBinding(revertKey, LocalizeStr("Revert"), ++line);
-				toggleMenu = KeyBinding(toggleMenu, LocalizeStr("Menu"), ++line);
-				fmUpKey = KeyBinding(fmUpKey, LocalizeStr("Up"), ++line);
-				fmDownKey = KeyBinding(fmDownKey, LocalizeStr("Down"), ++line);
-				fmForwardKey = KeyBinding(fmForwardKey, LocalizeStr("Forward"), ++line);
-				fmBackKey = KeyBinding(fmBackKey, LocalizeStr("Back"), ++line);
-				fmLeftKey = KeyBinding(fmLeftKey, LocalizeStr("Left"), ++line);
-				fmRightKey = KeyBinding(fmRightKey, LocalizeStr("Right"), ++line);
-				fmZoomInKey = KeyBinding(fmZoomInKey, LocalizeStr("ZoomIn"), ++line);
-				fmZoomOutKey = KeyBinding(fmZoomOutKey, LocalizeStr("ZoomOut"), ++line);
-				fmMovementModifier = KeyBinding(fmMovementModifier, LocalizeStr("Modifier"), ++line);
-				fmModeToggleKey = KeyBinding(fmModeToggleKey, LocalizeStr("FreeMoveMode"), ++line);
-				fmPivotModeKey = KeyBinding(fmPivotModeKey, LocalizeStr("PivotMode"), ++line);
-				resetRollKey = KeyBinding(resetRollKey, LocalizeStr("ResetRoll"), ++line);
+					GUI.Label(SliderLabelLeft(++line, contentWidth / 3f), Localize("ControlMode"));
+					fmMode = EnumRow(new Rect(leftIndent + contentWidth / 3f, contentTop + line * entryHeight, contentWidth * 2f / 3f, entryHeight), fmMode);
+				}
+
+				// Key bindings
+				if (GUI.Button(LabelRect(++line), Localize("EditKeybindings")))
+				{ editingKeybindings = !editingKeybindings; }
+				if (editingKeybindings)
+				{
+					cameraKey = KeyBinding(cameraKey, LocalizeStr("Activate"), ++line);
+					revertKey = KeyBinding(revertKey, LocalizeStr("Revert"), ++line);
+					toggleMenu = KeyBinding(toggleMenu, LocalizeStr("Menu"), ++line);
+					fmUpKey = KeyBinding(fmUpKey, LocalizeStr("Up"), ++line);
+					fmDownKey = KeyBinding(fmDownKey, LocalizeStr("Down"), ++line);
+					fmForwardKey = KeyBinding(fmForwardKey, LocalizeStr("Forward"), ++line);
+					fmBackKey = KeyBinding(fmBackKey, LocalizeStr("Back"), ++line);
+					fmLeftKey = KeyBinding(fmLeftKey, LocalizeStr("Left"), ++line);
+					fmRightKey = KeyBinding(fmRightKey, LocalizeStr("Right"), ++line);
+					fmZoomInKey = KeyBinding(fmZoomInKey, LocalizeStr("ZoomIn"), ++line);
+					fmZoomOutKey = KeyBinding(fmZoomOutKey, LocalizeStr("ZoomOut"), ++line);
+					fmMovementModifier = KeyBinding(fmMovementModifier, LocalizeStr("Modifier"), ++line);
+					fmModeToggleKey = KeyBinding(fmModeToggleKey, LocalizeStr("FreeMoveMode"), ++line);
+					fmPivotModeKey = KeyBinding(fmPivotModeKey, LocalizeStr("PivotMode"), ++line);
+					resetRollKey = KeyBinding(resetRollKey, LocalizeStr("ResetRoll"), ++line);
+				}
 			}
+			line += 0.25f;
 
 			Rect saveRect = HalfRect(++line, 0);
 			if (GUI.Button(saveRect, Localize("Save")))
@@ -3805,6 +3829,52 @@ namespace CameraTools
 			if (ShowTooltips && Event.current.type == EventType.Repaint && !string.IsNullOrEmpty(GUI.tooltip)) Tooltips.SetTooltip(GUI.tooltip, Event.current.mousePosition);
 		}
 
+		/// <summary>
+		/// A row of buttons with the selected one drawn pressed. Returns the index clicked this event, or -1.
+		/// </summary>
+		int ButtonRow(Rect rect, int selected, GUIContent[] labels)
+		{
+			int clicked = -1;
+			float width = rect.width / labels.Length;
+			for (int i = 0; i < labels.Length; ++i)
+			{
+				var r = new Rect(rect.x + i * width, rect.y, width - (i < labels.Length - 1 ? 2f : 0f), rect.height);
+				bool on = i == selected;
+				if (GUI.Toggle(r, on, labels[i], GUI.skin.button) != on) clicked = i; // A click on the selected button also counts (re-pick).
+			}
+			return clicked;
+		}
+
+		/// <summary>
+		/// Toolbar over an enum's values. Returns the selected value.
+		/// </summary>
+		T EnumRow<T>(Rect rect, T value) where T : struct, Enum
+		{
+			var values = EnumCache<T>.values;
+			int index = Array.IndexOf(values, value);
+			int clicked = ButtonRow(rect, index, EnumCache<T>.labels);
+			return clicked >= 0 ? values[clicked] : value;
+		}
+
+		static class EnumCache<T> where T : struct, Enum
+		{
+			public static readonly T[] values = (T[])Enum.GetValues(typeof(T));
+			public static readonly GUIContent[] labels = Enum.GetNames(typeof(T)).Select(n => new GUIContent(n)).ToArray();
+		}
+
+		// Stationary position modes, in selector order: current camera position, auto flyby, auto landing, manual offset, clicked position.
+		int StationaryPositionIndex => autoFlybyPosition ? 1 : autoLandingPosition ? 2 : manualOffset ? 3 : (setPresetOffset || waitingForPosition) ? 4 : 0;
+
+		void SetStationaryPosition(int index)
+		{
+			autoFlybyPosition = index == 1;
+			autoLandingPosition = index == 2;
+			manualOffset = index == 3;
+			setPresetOffset = false;
+			waitingForPosition = index == 4;
+			if (waitingForPosition) mouseUp = false;
+		}
+
 		void DrawIncrementButtons(Rect fieldRect, ref float val)
 		{
 			Rect incrButtonRect = new Rect(fieldRect.x - incrButtonWidth, fieldRect.y, incrButtonWidth, entryHeight);
@@ -3881,22 +3951,6 @@ namespace CameraTools
 			gameUIToggle = false;
 		}
 
-		void CycleToolMode(bool forward)
-		{
-			var length = System.Enum.GetValues(typeof(ToolModes)).Length;
-			if (forward)
-			{
-				toolMode++;
-				if ((int)toolMode == length) toolMode = 0;
-			}
-			else
-			{
-				toolMode--;
-				if ((int)toolMode == -1) toolMode = (ToolModes)length - 1;
-			}
-			if (toolMode != ToolModes.Pathing)
-			{ DeselectKeyframe(); }
-		}
 		#endregion
 
 		#region Utils
